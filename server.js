@@ -11,8 +11,13 @@ loadDotEnv(path.join(__dirname, ".env"));
 const PORT = Number(process.env.PORT || 8080);
 const KEY = (process.env.GEMINI_API_KEY || "").trim();
 // Tried in order: when one model is overloaded or out of quota, the next one answers.
-const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-flash-latest,gemini-2.5-flash-lite")
+// (22 Nov 2026: gemini-2.5-flash-lite returns 404 (retired) and gemini-flash-latest
+// hung for minutes, so both were dropped; busy models are retried instead.)
+const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash-lite,gemini-3.1-flash-lite")
   .split(",").map((s) => s.trim()).filter(Boolean);
+const ATTEMPT_TIMEOUT_MS = Number(process.env.GEMINI_ATTEMPT_TIMEOUT_MS || 25e3);
+const TOTAL_DEADLINE_MS = Number(process.env.GEMINI_DEADLINE_MS || 80e3); // stay under the proxy's ~100 s limit
+const MAX_ATTEMPTS = Number(process.env.GEMINI_MAX_ATTEMPTS || 5);
 const PER_IP_PER_HOUR = Number(process.env.PER_IP_PER_HOUR || 150);
 const DAILY_CAP = Number(process.env.DAILY_CAP || 1500); // protects the free quota from one heavy visitor
 const PUBLIC = path.join(__dirname, "public");
@@ -40,9 +45,17 @@ async function gemini({ system, messages, json }) {
     contents: messages.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
     generationConfig: Object.assign({ temperature: 0.3, maxOutputTokens: 8192 }, json ? { responseMimeType: "application/json" } : {}),
   });
-  let last = "";
-  for (const model of MODELS) {
-    const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 90e3);
+  // Plan: cycle through the models (A, B, A, B, ...) with a short pause between tries,
+  // each try capped at ATTEMPT_TIMEOUT_MS and the whole call at TOTAL_DEADLINE_MS.
+  const started = Date.now(), tries = [];
+  let usable = MODELS.slice();
+  for (let i = 0; i < MAX_ATTEMPTS && usable.length; i++) {
+    const model = usable[i % usable.length];
+    const left = TOTAL_DEADLINE_MS - (Date.now() - started);
+    if (left < 5e3) break;
+    if (i > 0) await new Promise((r) => setTimeout(r, Math.min(i * 1000, 3000)));
+    const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), Math.min(ATTEMPT_TIMEOUT_MS, left));
+    let note;
     try {
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
         method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": KEY }, body, signal: ctl.signal,
@@ -50,17 +63,23 @@ async function gemini({ system, messages, json }) {
       if (r.ok) {
         const j = await r.json();
         const text = ((j.candidates || [])[0]?.content?.parts || []).map((x) => x.text || "").join("");
-        if (text) return { text, model };
-        last = `${model}: empty reply (${(j.candidates || [])[0]?.finishReason || j.promptFeedback?.blockReason || "no candidates"})`;
-        continue;
+        if (text) {
+          if (tries.length) console.log(new Date().toISOString(), "gemini ok on", model, "after:", tries.join("; "));
+          return { text, model };
+        }
+        note = `empty reply (${(j.candidates || [])[0]?.finishReason || j.promptFeedback?.blockReason || "no candidates"})`;
+      } else {
+        note = String(r.status);
+        // 404 = retired model: stop using it. Other 4xx (except 429) are our fault: stop altogether.
+        if (r.status === 404) usable = usable.filter((m) => m !== model);
+        else if (r.status !== 429 && r.status < 500) { tries.push(`${model}: ${note}`); break; }
       }
-      last = `${model}: ${r.status}`;
-      // 429 quota, 5xx overload, 404 retired model -> try the next one. Other 4xx are our fault: stop.
-      if (!(r.status === 429 || r.status >= 500 || r.status === 404)) break;
-    } catch (e) { last = `${model}: ${e.name === "AbortError" ? "timed out" : "network error"}`; }
+    } catch (e) { note = e.name === "AbortError" ? "timed out" : "network error"; }
     finally { clearTimeout(timer); }
+    tries.push(`${model}: ${note}`);
+    console.error(new Date().toISOString(), "gemini try failed:", model, note);
   }
-  const err = new Error("The AI didn't answer (" + last + "). Try again in a minute.");
+  const err = new Error("The AI didn't answer (" + (tries.join("; ") || "no model available") + "). Try again in a minute.");
   err.status = 502; throw err;
 }
 
@@ -178,7 +197,7 @@ if (require.main === module) {
     keepAwake();
   });
 }
-module.exports = { server, validate, istHourAllowed };
+module.exports = { server, validate, istHourAllowed, gemini };
 
 function loadDotEnv(file) {
   try {

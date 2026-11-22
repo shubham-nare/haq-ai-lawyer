@@ -2986,7 +2986,7 @@ Return ONLY JSON: ${keys}`, messages: [{ role: "user", content: transcript }] };
         const p = H.helpPrompt({ topic: tri.topic !== "unknown" && tri.topic !== "other" ? tri.topic : "notice", depth: 2, language: "English", caseFile: {}, history: [], userText: c.text });
         const { raw, data } = await llmJSON({ system: p.system, messages: p.messages });
         const g = H.guard(data.reply || "", { userAmounts: facts.amounts });
-        Object.assign(rec, { ai_topic: data.topic, ai_topic_correct: data.topic === c.expect_topic, raw_model_output: raw, reply_after_guard: g.text, guard_report: g.report, escalations: H.escalations(c.text, data.topic, facts), needs_lawyer: data.needs_lawyer });
+        Object.assign(rec, { model: S.lastModel || null, ai_topic: data.topic, ai_topic_correct: data.topic === c.expect_topic, raw_model_output: raw, reply_after_guard: g.text, guard_report: g.report, escalations: H.escalations(c.text, data.topic, facts), needs_lawyer: data.needs_lawyer });
       } catch (err) { rec.error = String(err.message || err); }
       out.results.push(rec); await sleep(400);
     }
