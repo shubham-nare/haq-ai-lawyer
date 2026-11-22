@@ -134,12 +134,25 @@ const server = http.createServer(async (req, res) => {
 // RENDER_EXTERNAL_URL is set by Render automatically; locally nothing happens.
 // Turn it off with KEEP_AWAKE=0 (Render's free plan gives 750 hours a month per
 // workspace, and one service awake all month uses about 744 of them).
+// KEEP_AWAKE_UNTIL: stop pinging after this moment (the review window ends 3 Dec).
+// KEEP_AWAKE_IST_HOURS: e.g. "8-24" pings only 08:00-24:00 India time, so the
+// service sleeps at night and saves free hours (empty = all day).
+const KEEP_AWAKE_UNTIL = Date.parse(process.env.KEEP_AWAKE_UNTIL || "2026-12-04T00:00:00+05:30");
+function istHourAllowed(now, spec) {
+  const m = String(spec || "").match(/^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$/);
+  if (!m) return true;
+  const h = new Date(now + 5.5 * 3600e3).getUTCHours(), from = +m[1], to = +m[2];
+  return from <= to ? h >= from && h < to : h >= from || h < to;
+}
 function keepAwake() {
   const base = (process.env.KEEP_AWAKE_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/+$/, "");
   const minutes = Number(process.env.KEEP_AWAKE_MINUTES || 10);
   if (!base || process.env.KEEP_AWAKE === "0" || !(minutes > 0)) return null;
   let fails = 0;
   const ping = async () => {
+    const now = Date.now();
+    if (now >= KEEP_AWAKE_UNTIL) { clearInterval(timer); console.log("keep-awake: end date reached, stopped"); return; }
+    if (!istHourAllowed(now, process.env.KEEP_AWAKE_IST_HOURS)) return; // night: let it sleep
     try {
       const r = await fetch(base + "/healthz", { headers: { "User-Agent": "haq-keep-awake" }, signal: AbortSignal.timeout(30e3) });
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -152,7 +165,7 @@ function keepAwake() {
   };
   const timer = setInterval(ping, minutes * 60e3);
   timer.unref();
-  console.log(`keep-awake: pinging ${base}/healthz every ${minutes} min`);
+  console.log(`keep-awake: pinging ${base}/healthz every ${minutes} min until ${new Date(KEEP_AWAKE_UNTIL).toISOString()}${process.env.KEEP_AWAKE_IST_HOURS ? ", IST hours " + process.env.KEEP_AWAKE_IST_HOURS : ""}`);
   return timer;
 }
 
@@ -162,7 +175,7 @@ if (require.main === module) {
     keepAwake();
   });
 }
-module.exports = { server, validate };
+module.exports = { server, validate, istHourAllowed };
 
 function loadDotEnv(file) {
   try {
