@@ -1,0 +1,16 @@
+# One-click deploy on Render's free plan. Render asks for GEMINI_API_KEY while creating the service.
+services:
+  - type: web
+    name: haq-ai-lawyer
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: NODE_VERSION
+        value: "22"

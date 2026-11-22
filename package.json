@@ -1,0 +1,13 @@
+{
+  "name": "haq-ai-lawyer",
+  "version": "1.0.0",
+  "description": "Haq: an AI legal helper for everyday problems in India, with a checker that blocks invented law.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run.js"
+  },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}
