@@ -127,8 +127,40 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ------------------------------------------------------------------ keep awake
+// Render's free plan puts a service to sleep after 15 minutes with no incoming
+// traffic, and the next visitor then waits about a minute. Pinging our own
+// public URL every few minutes counts as incoming traffic, so it never sleeps.
+// RENDER_EXTERNAL_URL is set by Render automatically; locally nothing happens.
+// Turn it off with KEEP_AWAKE=0 (Render's free plan gives 750 hours a month per
+// workspace, and one service awake all month uses about 744 of them).
+function keepAwake() {
+  const base = (process.env.KEEP_AWAKE_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/+$/, "");
+  const minutes = Number(process.env.KEEP_AWAKE_MINUTES || 10);
+  if (!base || process.env.KEEP_AWAKE === "0" || !(minutes > 0)) return null;
+  let fails = 0;
+  const ping = async () => {
+    try {
+      const r = await fetch(base + "/healthz", { headers: { "User-Agent": "haq-keep-awake" }, signal: AbortSignal.timeout(30e3) });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      if (fails) console.log(new Date().toISOString(), "keep-awake: ping OK again");
+      fails = 0;
+    } catch (e) {
+      fails++;
+      if (fails === 1 || fails % 6 === 0) console.error(new Date().toISOString(), "keep-awake: ping failed (" + fails + "):", e.message);
+    }
+  };
+  const timer = setInterval(ping, minutes * 60e3);
+  timer.unref();
+  console.log(`keep-awake: pinging ${base}/healthz every ${minutes} min`);
+  return timer;
+}
+
 if (require.main === module) {
-  server.listen(PORT, () => console.log(`Haq on http://localhost:${PORT}  AI: ${KEY ? "Gemini (" + MODELS.join(" > ") + ")" : "OFF (no GEMINI_API_KEY)"}`));
+  server.listen(PORT, () => {
+    console.log(`Haq on http://localhost:${PORT}  AI: ${KEY ? "Gemini (" + MODELS.join(" > ") + ")" : "OFF (no GEMINI_API_KEY)"}`);
+    keepAwake();
+  });
 }
 module.exports = { server, validate };
 

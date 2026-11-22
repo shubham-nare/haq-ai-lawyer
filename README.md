@@ -31,7 +31,7 @@ No `npm install` needed: there are no dependencies. Node 18+.
 ## Deploy (free)
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/shubham-nare/haq-ai-lawyer)
 
-Render reads `render.yaml` and asks for `GEMINI_API_KEY`. Free services sleep after 15 idle minutes, so open the site a minute before a demo.
+Render reads `render.yaml` and asks for `GEMINI_API_KEY`. Free services sleep after 15 idle minutes and then take about a minute to wake. To avoid that, the server pings its own `/healthz` every 10 minutes when it runs on Render (it uses `RENDER_EXTERNAL_URL`, which Render sets). Set `KEEP_AWAKE=0` to turn this off. One always-awake service uses about 744 of the 750 free hours Render gives each workspace per month, so keep only one free service awake at a time.
 
 ## Raw outputs
 Settings ⚙ → **Run test cases** runs the 41 built-in cases through the live AI and downloads every raw reply, the checked reply and the checker's report as JSON.
