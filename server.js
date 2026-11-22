@@ -135,9 +135,12 @@ const server = http.createServer(async (req, res) => {
 // Turn it off with KEEP_AWAKE=0 (Render's free plan gives 750 hours a month per
 // workspace, and one service awake all month uses about 744 of them).
 // KEEP_AWAKE_UNTIL: stop pinging after this moment (the review window ends 3 Dec).
-// KEEP_AWAKE_IST_HOURS: e.g. "8-24" pings only 08:00-24:00 India time, so the
-// service sleeps at night and saves free hours (empty = all day).
+// Night break: until KEEP_AWAKE_HOURS_UNTIL (end of 30 Nov IST) it pings only during
+// KEEP_AWAKE_IST_HOURS (08:00-24:00 India time), so it sleeps at night and the
+// November free hours last. From 1 Dec it pings all day ("" = always all day).
 const KEEP_AWAKE_UNTIL = Date.parse(process.env.KEEP_AWAKE_UNTIL || "2026-12-04T00:00:00+05:30");
+const KEEP_AWAKE_IST_HOURS = process.env.KEEP_AWAKE_IST_HOURS ?? "8-24";
+const KEEP_AWAKE_HOURS_UNTIL = Date.parse(process.env.KEEP_AWAKE_HOURS_UNTIL || "2026-12-01T00:00:00+05:30");
 function istHourAllowed(now, spec) {
   const m = String(spec || "").match(/^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$/);
   if (!m) return true;
@@ -152,7 +155,7 @@ function keepAwake() {
   const ping = async () => {
     const now = Date.now();
     if (now >= KEEP_AWAKE_UNTIL) { clearInterval(timer); console.log("keep-awake: end date reached, stopped"); return; }
-    if (!istHourAllowed(now, process.env.KEEP_AWAKE_IST_HOURS)) return; // night: let it sleep
+    if (now < KEEP_AWAKE_HOURS_UNTIL && !istHourAllowed(now, KEEP_AWAKE_IST_HOURS)) return; // night break: let it sleep
     try {
       const r = await fetch(base + "/healthz", { headers: { "User-Agent": "haq-keep-awake" }, signal: AbortSignal.timeout(30e3) });
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -165,7 +168,7 @@ function keepAwake() {
   };
   const timer = setInterval(ping, minutes * 60e3);
   timer.unref();
-  console.log(`keep-awake: pinging ${base}/healthz every ${minutes} min until ${new Date(KEEP_AWAKE_UNTIL).toISOString()}${process.env.KEEP_AWAKE_IST_HOURS ? ", IST hours " + process.env.KEEP_AWAKE_IST_HOURS : ""}`);
+  console.log(`keep-awake: pinging ${base}/healthz every ${minutes} min until ${new Date(KEEP_AWAKE_UNTIL).toISOString()}${KEEP_AWAKE_IST_HOURS ? ", only " + KEEP_AWAKE_IST_HOURS + " IST until " + new Date(KEEP_AWAKE_HOURS_UNTIL).toISOString() : ""}`);
   return timer;
 }
 

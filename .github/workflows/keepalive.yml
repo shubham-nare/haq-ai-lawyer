@@ -1,0 +1,42 @@
+# Backup pinger for the Render free plan (it sleeps after 15 minutes without traffic).
+# The server also pings itself, and cron-job.org pings every 5 minutes; this is the third line.
+# Schedule (India time): until 30 Nov, 08:00-24:00 only (night break saves free hours);
+# 1-3 Dec all day; after 3 Dec the workflow switches itself off.
+# GitHub may start scheduled runs late, so this is a backup, not the main pinger.
+name: keep the site awake
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (UTC); the step below applies the India-time schedule
+  workflow_dispatch: {}       # "Run workflow" button in the Actions tab
+
+permissions:
+  actions: write              # only so it can disable itself after 3 Dec
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping /healthz (India-time schedule)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          day=$(TZ=Asia/Kolkata date +%Y%m%d); hour=$(TZ=Asia/Kolkata date +%H)
+          if [ "$day" -gt 20261203 ]; then
+            echo "Review window over (after 3 Dec IST): disabling this workflow."
+            gh workflow disable keepalive.yml --repo "$GITHUB_REPOSITORY"
+            exit 0
+          fi
+          if [ "$day" -le 20261130 ] && [ "$hour" -lt 8 ]; then
+            echo "Night break (00:00-08:00 IST until 30 Nov): not pinging."
+            exit 0
+          fi
+          for path in /healthz; do
+            for attempt in 1 2 3; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "https://haq-ai-lawyer.onrender.com$path" || true)
+              echo "$path attempt $attempt: $code"
+              [ "$code" = "200" ] && break
+              sleep 20
+            done
+          done
