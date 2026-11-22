@@ -2251,7 +2251,14 @@ Return ONLY JSON: ${keys}`, messages: [{ role: "user", content: transcript }] };
     } catch (e) { S.server = null; }
     S.serverChecked = true; afterCaps();
   }
-  const canListen = () => !!(S.dictation || window.SpeechRecognition || window.webkitSpeechRecognition);
+  // Voice in: the browser's own speech recognition where it works (Chrome, Edge: live captions),
+  // otherwise record a clip and let Haq's server transcribe it with Gemini (Brave, Firefox...).
+  const hasSR = () => !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const canRecord = () => !!(S.server && window.MediaRecorder && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && (window.AudioContext || window.webkitAudioContext));
+  // Brave exposes SpeechRecognition but blocks Google's speech service behind it ("network" error).
+  S.serverStt = !!navigator.brave;
+  const useServerStt = () => !S.dictation && canRecord() && (S.serverStt || !hasSR());
+  const canListen = () => !!(S.dictation || hasSR() || canRecord());
   const canSpeak = () => !!(S.tts || window.speechSynthesis);
   function afterCaps() {
     $("#micBtn").hidden = !canListen();
@@ -2332,24 +2339,86 @@ Return ONLY JSON: ${keys}`, messages: [{ role: "user", content: transcript }] };
       started: false,
       partial(t) { input.value = (base + " " + heard + " " + t).trim(); cap.innerHTML = `<span class="w on">${esc((heard + " " + t).trim() || "Listening…")}</span>`; },
       final(t) { heard = (heard + " " + t).trim(); input.value = (base + " " + heard).trim(); },
-      end() { if (S.listen !== L) return; S.listen = null; button.classList.remove("live"); av.setState("idle"); const text = input.value.trim(); if (text && text !== base) onDone(); else capNote(cap, "I didn't catch that. Tap the mic and try again."); },
+      end() { if (S.listen !== L) return; S.listen = null; button.classList.remove("live"); av.setState("idle"); const text = input.value.trim(); if (text && text !== base) onDone(); else capNote(cap, L.why || "I didn't catch that. Tap the mic and try again."); },
+      fail(msg) { if (S.listen !== L) return; S.listen = null; button.classList.remove("live"); av.setState("idle"); if (av === helpAv) status("Tap to talk"); capNote(cap, msg); },
+      why: "",
       stop: null,
     };
     button.classList.add("live"); av.setState("listening"); capNote(cap, "Listening… tap the mic when you're done.");
     if (av === helpAv) status("Listening");
-    if (S.dictation) {
+    if (useServerStt()) {
+      recordForServer(L, cap);
+    } else if (S.dictation) {
       S.dictation.start().then(() => { L.started = true; }).catch((e) => { S.listen = null; button.classList.remove("live"); av.setState("idle"); capNote(cap, e && e.code === "not_granted" ? "Microphone access is off. Type instead." : "Voice input couldn't start. Type instead."); });
       L.stop = () => S.dictation.stop();
     } else {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition; const r = new SR();
       r.lang = langCode() + "-IN"; r.interimResults = true; r.continuous = false;
       r.onresult = (e) => { let fin = "", part = ""; for (const res of e.results) (res.isFinal ? (fin += res[0].transcript + " ") : (part += res[0].transcript)); heard = fin.trim(); L.partial(part); };
-      r.onerror = () => {}; r.onend = () => L.end();
+      r.onerror = (e) => {
+        const err = e && e.error;
+        if ((err === "network" || err === "service-not-allowed" || err === "language-not-supported") && canRecord()) {
+          S.serverStt = true; // this browser's speech service doesn't work here: use Haq's from now on
+          L.why = "This browser's speech service isn't available, so Haq will write down your voice itself. Tap the mic and speak again.";
+        } else if (err === "not-allowed") L.why = "Microphone access is blocked for this site. Allow it from the icon in the address bar, or type instead.";
+        else if (err === "no-speech") L.why = "I didn't hear anything. Tap the mic and speak.";
+        else if (err === "audio-capture") L.why = "No microphone was found. Type instead.";
+        else if (err && err !== "aborted") L.why = "Voice input stopped (" + err + "). Type instead, or try again.";
+      };
+      r.onend = () => L.end();
       try { r.start(); L.started = true; } catch (e) { L.end(); }
       L.stop = () => r.stop();
     }
   }
-  function stopListening() { const L = S.listen; if (!L) return; try { L.stop && L.stop(); } catch (e) { L.end(); } if (!S.dictation) return; setTimeout(() => { if (S.listen === L) L.end(); }, 1500); }
+  function stopListening() { const L = S.listen; if (!L) return; if (L.recorder && !L.stop) { L.fail("Stopped."); return; } try { L.stop && L.stop(); } catch (e) { L.end(); } if (!S.dictation || L.recorder) return; setTimeout(() => { if (S.listen === L) L.end(); }, 1500); }
+
+  // Record a clip (up to 45 s), turn it into 16 kHz mono WAV and have Haq's server transcribe it.
+  async function recordForServer(L, cap) {
+    L.recorder = true;
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+    catch (e) { L.fail(e && e.name === "NotAllowedError" ? "Microphone access is blocked for this site. Allow it from the icon in the address bar, or type instead." : "Couldn't open the microphone. Type instead."); return; }
+    if (S.listen !== L) { stream.getTracks().forEach((t) => t.stop()); return; }
+    const chunks = []; let mr;
+    try { mr = new MediaRecorder(stream); } catch (e) { stream.getTracks().forEach((t) => t.stop()); L.fail("This browser can't record audio. Type instead."); return; }
+    mr.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const cap45 = setTimeout(() => { if (mr.state === "recording") mr.stop(); }, 45000);
+    mr.onstop = async () => {
+      clearTimeout(cap45); stream.getTracks().forEach((t) => t.stop());
+      if (S.listen !== L) return;
+      cap.innerHTML = `<span class="w on">Writing down what you said…</span>`;
+      try {
+        const wav = await toWav16k(new Blob(chunks, { type: mr.mimeType || "audio/webm" }));
+        if (!wav) { L.why = "That was too short. Tap the mic, speak, then tap it again."; L.end(); return; }
+        const r = await fetch("api/transcribe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ audio: bufToB64(wav), mime: "audio/wav", lang: S.lang }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || `server error ${r.status}`);
+        if (j.text) L.final(j.text);
+        else L.why = "I couldn't make out any words. Tap the mic and try again, a little closer.";
+        L.end();
+      } catch (e) { L.fail("Couldn't turn your voice into text (" + (e.message || e) + "). Type instead, or try again."); }
+    };
+    mr.start(250); L.started = true;
+    L.stop = () => { if (mr.state === "recording") mr.stop(); };
+    cap.innerHTML = `<span class="w on">Listening… tap the mic when you're done.</span>`;
+  }
+  async function toWav16k(blob) {
+    const AC = window.AudioContext || window.webkitAudioContext; const ac = new AC();
+    let audio; try { audio = await ac.decodeAudioData(await blob.arrayBuffer()); } finally { try { ac.close(); } catch (e) {} }
+    const rate = 16000, len = Math.ceil(audio.duration * rate);
+    if (len < rate * 0.4) return null; // under 0.4 s: nothing said
+    const off = new OfflineAudioContext(1, len, rate); const src = off.createBufferSource();
+    src.buffer = audio; src.connect(off.destination); src.start();
+    const pcm = (await off.startRendering()).getChannelData(0);
+    const dv = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, "RIFF"); dv.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE"); str(12, "fmt ");
+    dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true); dv.setUint32(24, rate, true);
+    dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true); str(36, "data"); dv.setUint32(40, pcm.length * 2, true);
+    for (let i = 0; i < pcm.length; i++) { const s = Math.max(-1, Math.min(1, pcm[i])); dv.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true); }
+    return dv.buffer;
+  }
+  function bufToB64(buf) { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
 
   // ------------------------------------------------------------ downloads / copy
   async function saveFile(filename, data) {

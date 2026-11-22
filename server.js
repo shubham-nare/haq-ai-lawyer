@@ -39,10 +39,10 @@ function allow(ip) {
 function clientIp(req) { return String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim(); }
 
 // ------------------------------------------------------------------ Gemini
-async function gemini({ system, messages, json }) {
+async function gemini({ system, messages, json, contents }) {
   const body = JSON.stringify({
     systemInstruction: { parts: [{ text: system }] },
-    contents: messages.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
+    contents: contents || messages.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
     generationConfig: Object.assign({ temperature: 0.3, maxOutputTokens: 8192 }, json ? { responseMimeType: "application/json" } : {}),
   });
   // Plan: cycle through the models (A, B, A, B, ...) with a short pause between tries,
@@ -107,6 +107,16 @@ function send(res, status, data, type = "application/json") {
   });
   res.end(buf);
 }
+// Audio clip from the page: base64 WAV, at most ~60 s of 16 kHz mono (the page stops at 45 s).
+function validateAudio(p) {
+  if (!p || typeof p.audio !== "string" || p.mime !== "audio/wav") return "Bad audio.";
+  if (p.audio.length < 2000) return "Recording too short.";
+  if (p.audio.length > 2.6e6) return "Recording too long. Keep it under 45 seconds.";
+  if (!/^[A-Za-z0-9+/]+=*$/.test(p.audio)) return "Bad audio.";
+  if (p.lang != null && typeof p.lang !== "string") return "Bad language.";
+  return null;
+}
+
 function readBody(req, limit = 400e3) {
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
@@ -129,6 +139,27 @@ const server = http.createServer(async (req, res) => {
       const limited = allow(clientIp(req)); if (limited) return send(res, 429, { error: limited });
       const out = await gemini({ system: p.system, messages: p.messages, json: p.json !== false });
       return send(res, 200, out);
+    }
+    if (url.pathname === "/api/transcribe") {
+      // Voice input for browsers whose built-in speech recognition doesn't work (Brave, Firefox):
+      // the page records a short WAV clip and Gemini writes down what was said.
+      if (req.method !== "POST") return send(res, 405, { error: "POST only." });
+      if (!KEY) return send(res, 503, { error: "No AI key is set on this server." });
+      const p = JSON.parse(await readBody(req, 2.7e6));
+      const bad = validateAudio(p); if (bad) return send(res, 400, { error: bad });
+      const limited = allow(clientIp(req)); if (limited) return send(res, 429, { error: limited });
+      const lang = (p.lang || "English").slice(0, 40);
+      const out = await gemini({
+        system: "You are a speech-to-text service for an Indian legal-help app. You only transcribe; you never answer or add anything.",
+        json: true,
+        contents: [{ role: "user", parts: [
+          { inlineData: { mimeType: p.mime, data: p.audio } },
+          { text: `Transcribe this recording exactly as spoken. The speaker most likely uses ${lang}, but may mix languages (e.g. Hinglish). Write each language in its own script (Hindi in Devanagari, Telugu in Telugu script, English in Latin). Keep numbers as digits. Return JSON {"transcript": "..."}; use an empty string if there is no clear speech.` },
+        ] }],
+      });
+      let text = "";
+      try { text = String(JSON.parse(out.text).transcript || "").trim(); } catch (e) { text = out.text.trim(); }
+      return send(res, 200, { text: text.slice(0, 4000), model: out.model });
     }
     if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, { error: "Method not allowed." });
     // static files from public/, no path escape
@@ -197,7 +228,7 @@ if (require.main === module) {
     keepAwake();
   });
 }
-module.exports = { server, validate, istHourAllowed, gemini };
+module.exports = { server, validate, validateAudio, istHourAllowed, gemini };
 
 function loadDotEnv(file) {
   try {
